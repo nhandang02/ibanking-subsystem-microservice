@@ -1,0 +1,218 @@
+services:
+  auth-postgres:
+    image: postgres:16-alpine
+    container_name: auth_postgres
+    environment:
+      POSTGRES_DB: authdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5433:5432"
+    volumes:
+      - auth_pgdata:/var/lib/postgresql/data
+
+  tuition-postgres:
+    image: postgres:16-alpine
+    container_name: tuition_postgres
+    environment:
+      POSTGRES_DB: tuition_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5435:5432"
+    volumes:
+      - tuition_pgdata:/var/lib/postgresql/data
+
+  payment-postgres:
+    image: postgres:16-alpine
+    container_name: payment_postgres
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5436:5432"
+    volumes:
+      - payment_pgdata:/var/lib/postgresql/data
+
+  users-postgres:
+    image: postgres:16-alpine
+    container_name: users_postgres
+    environment:
+      POSTGRES_DB: usersdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5437:5432"
+    volumes:
+      - users_pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: ibanking_redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: ibanking_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./services/auth-service/Dockerfile
+    container_name: auth_service
+    environment:
+      PORT: 4001
+      DB_HOST: auth-postgres
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      DB_NAME: authdb
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      - auth-postgres
+      - rabbitmq
+      - redis
+    ports:
+      - "4001:4001"
+
+  users-service:
+    build:
+      context: .
+      dockerfile: ./services/users-service/Dockerfile
+    container_name: users_service
+    environment:
+      PORT: 4005
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      DB_HOST: users-postgres
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      DB_NAME: usersdb\
+      SEED: "true"
+    depends_on:
+      - users-postgres
+      - rabbitmq
+    ports:
+      - "4005:4005"
+
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./services/notification-service/Dockerfile
+    container_name: notification_service
+    environment:
+      PORT: 4003
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      - rabbitmq
+      - redis
+    # No ports exposed - runs as RPC worker only
+    # ports:
+    #   - "4003:4003"
+
+  otp-service:
+    build:
+      context: .
+      dockerfile: ./services/otp-service/Dockerfile
+    container_name: otp_service
+    environment:
+      PORT: 4004
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      - rabbitmq
+      - redis
+    # No ports exposed - runs as RPC worker only
+    # ports:
+    #   - "4004:4004"
+
+  tuition-service:
+    build:
+      context: .
+      dockerfile: ./services/tuition-service/Dockerfile
+    container_name: tuition_service
+    environment:
+      PORT: 4006
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      DB_HOST: tuition-postgres
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      DB_NAME: tuition_db
+      SEED: "true"
+    depends_on:
+      - rabbitmq
+      - tuition-postgres
+    ports:
+      - "4006:4006"
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: ./services/payment-service/Dockerfile
+    container_name: payment_service
+    environment:
+      PORT: 4007
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      DB_HOST: payment-postgres
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      DB_NAME: payment_db
+    depends_on:
+      - rabbitmq
+      - payment-postgres
+    ports:
+      - "4007:4007"
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./services/api-gateway/Dockerfile
+    container_name: api_gateway
+    environment:
+      PORT: 4000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_SERVICE_URL: http://auth_service:4001
+      TUITION_SERVICE_URL: http://tuition_service:4006
+      PAYMENT_SERVICE_URL: http://payment_service:4007
+      # notification and otp services are accessed through payment service
+    depends_on:
+      - auth-service
+      - users-service
+      - notification-service
+      - otp-service
+      - tuition-service
+      - payment-service
+      - redis
+    ports:
+      - "4000:4000"
+
+volumes:
+  auth_pgdata:
+  tuition_pgdata:
+  payment_pgdata:
+  users_pgdata:
+  redis_data:
+  rabbitmq_data:
+
+
