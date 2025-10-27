@@ -41,40 +41,108 @@ git clone <repository-url>
 cd ibanking-subsystem
 ```
 
-2. Set up environment variables:
+2. Set up environment variables for each service:
+
 ```bash
-cp env.example .env
+# Copy environment examples for all services
+cp services/api-gateway/env.example services/api-gateway/.env
+cp services/auth-service/env.example services/auth-service/.env
+cp services/notification-service/env.example services/notification-service/.env
+cp services/otp-service/env.example services/otp-service/.env
+cp services/payment-service/env.example services/payment-service/.env
+cp services/tuition-service/env.example services/tuition-service/.env
+cp services/users-service/env.example services/users-service/.env
 ```
 
-3. Configure your `.env` file:
+3. Configure each service's `.env` file:
+
+**API Gateway** (`services/api-gateway/.env`):
 ```env
-# JWT
+NODE_ENV=development
+PORT=4000
 JWT_SECRET=your-super-secret-jwt-key
 JWT_EXPIRES_IN=24h
 JWT_REFRESH_SECRET=your-super-secret-jwt-refresh-key
 JWT_REFRESH_EXPIRES_IN=7d
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+```
 
-# Email (Nodemailer)
+**Auth Service** (`services/auth-service/.env`):
+```env
+NODE_ENV=development
+PORT=4001
+JWT_SECRET=your-super-secret-jwt-key
+JWT_EXPIRES_IN=24h
+JWT_REFRESH_SECRET=your-super-secret-jwt-refresh-key
+JWT_REFRESH_EXPIRES_IN=7d
+DB_HOST=auth_postgres
+DB_PORT=5432
+DB_USERNAME=postgres
+DB_PASSWORD=postgres
+DB_NAME=authdb
+```
+
+**Notification Service** (`services/notification-service/.env`):
+```env
+NODE_ENV=production
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your-email@gmail.com
 SMTP_PASS=your-app-password
-
-# Redis
-REDIS_PORT=6379
-
-# RabbitMQ
-RABBITMQ_USER=guest
-RABBITMQ_PASS=guest
-RABBITMQ_PORT=5672
-RABBITMQ_MGMT_PORT=15672
-
-# CORS
-ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
-
-# Environment
-NODE_ENV=development
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
 ```
+
+**OTP Service** (`services/otp-service/.env`):
+```env
+NODE_ENV=development
+PORT=4004
+REDIS_HOST=redis
+REDIS_PORT=6379
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+```
+
+**Payment Service** (`services/payment-service/.env`):
+```env
+NODE_ENV=development
+PORT=4007
+DB_HOST=payment_postgres
+DB_PORT=5432
+DB_USERNAME=postgres
+DB_PASSWORD=postgres
+DB_NAME=payment_db
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+REDIS_HOST=redis
+REDIS_PORT=6379
+```
+
+**Tuition Service** (`services/tuition-service/.env`):
+```env
+NODE_ENV=development
+PORT=4006
+DB_HOST=tuition_postgres
+DB_PORT=5432
+DB_USERNAME=postgres
+DB_PASSWORD=postgres
+DB_NAME=tuition_db
+```
+
+**Users Service** (`services/users-service/.env`):
+```env
+NODE_ENV=development
+PORT=4005
+DB_HOST=users_postgres
+DB_PORT=5432
+DB_USERNAME=postgres
+DB_PASSWORD=postgres
+DB_NAME=usersdb
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+```
+
+**⚠️ Important Notes:**
+- Set `NODE_ENV=production` in notification service to enable real email sending
+- Replace `your-email@gmail.com` and `your-app-password` with your actual Gmail credentials
+- Replace `your-super-secret-jwt-key` with a strong secret key
+- All database hosts use Docker service names (e.g., `auth_postgres`, `payment_postgres`)
 
 4. Start the entire system with Docker Compose:
 ```bash
@@ -88,13 +156,13 @@ docker-compose logs -f
 docker-compose down
 ```
 
-5. Alternative: Start services individually using scripts:
+5. (Optional) Update tuition data using SQL script:
 ```bash
-# Start infrastructure first (databases, Redis, RabbitMQ)
-./scripts/start-infrastructure.sh
+# Run tuition update script
+docker exec -i tuition_postgres psql -U postgres -d tuition_db < scripts/insert_tuition.sql
 
-# Then start services one by one or use the interactive menu
-./scripts/start-service.sh
+# Or manually connect to database
+docker exec -it tuition_postgres psql -U postgres -d tuition_db
 ```
 
 ## API Documentation
@@ -155,7 +223,8 @@ All endpoints are accessed through the API Gateway at `http://localhost:4000`
 ### Payments
 - `POST /payments` - Create payment preparation (requires JWT)
 - `GET /payments/:id` - Get payment details (requires JWT)
-- `GET /payments` - Get user payment history (requires JWT)
+- `GET /payments/history` - Get user payment history (requires JWT)
+- `GET /payments/:paymentId/saga` - Get saga details for payment cancellation reason (requires JWT)
 
 ### OTP
 - `POST /otp/generate` - Generate OTP for payment (requires JWT)
