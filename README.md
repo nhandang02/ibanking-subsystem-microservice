@@ -201,96 +201,131 @@ Once the application is running, visit:
 - **Caching**: Redis for OTP and session data
 - **Saga Pattern**: Payment Service orchestrates distributed transactions
 
-## API Endpoints
+## API Endpoints & Message Events
 
+### Public API Endpoints (HTTP)
 All endpoints are accessed through the API Gateway at `http://localhost:4000`
 
-### Authentication
+#### Health Check
+- `GET /health` - Check health status of all services
+
+#### Authentication
 - `POST /auth/signin` - User sign in
-- `POST /auth/signup` - User registration
-- `POST /auth/refresh` - Refresh access token
-- `POST /auth/logout` - User logout
-- `GET /auth/profile` - Get user profile (requires JWT)
+- `POST /auth/signup` - User registration  
+- `GET /auth/refresh` - Refresh access token (uses refresh token from cookies)
+- `POST /auth/logout` - User logout (clears refresh token)
+- `GET /auth/logout-all` - Logout from all devices (requires JWT)
+- `GET /auth/me` - Get current user profile (requires JWT)
 
-### Users
-- `GET /users/profile` - Get user profile (requires JWT)
-- `PUT /users/profile` - Update user profile (requires JWT)
-- `GET /users/balance` - Get user balance (requires JWT)
+#### Tuition Management
+- `GET /tuition/:studentId` - Lookup student by student ID (requires JWT)
+- `GET /tuition` - Get all students (requires JWT)
 
-### Students
-- `POST /students/lookup` - Lookup student by code (requires JWT)
-
-### Payments
-- `POST /payments` - Create payment preparation (requires JWT)
-- `GET /payments/:id` - Get payment details (requires JWT)
+#### Payment Processing (Saga Pattern)
+- `POST /payments` - Start payment processing saga (requires JWT)
 - `GET /payments/history` - Get user payment history (requires JWT)
+- `GET /payments/:paymentId` - Get payment details by ID (requires JWT)
 - `GET /payments/:paymentId/saga` - Get saga details for payment cancellation reason (requires JWT)
 
-### OTP
-- `POST /otp/generate` - Generate OTP for payment (requires JWT)
-- `POST /otp/verify` - Verify OTP code (requires JWT)
-- `POST /otp/resend` - Resend OTP (requires JWT)
+#### OTP Management
+- `POST /otp/verify` - Verify OTP code for payment (requires JWT)
+- `POST /payments/resend-otp/:paymentId` - Resend OTP for payment (requires JWT)
+- `GET /otp/info/:paymentId` - Get OTP information for payment (requires JWT)
 
-### Transactions
-- `POST /transactions/execute` - Execute transaction after OTP verification (requires JWT)
-- `GET /transactions/history` - Get transaction history (requires JWT)
+### Message Events (RabbitMQ)
+Internal communication between services via RabbitMQ events
 
-### Health Check
-- `GET /health` - Check health status of all services
+#### Payment Events
+- `payment.created` - Payment saga started
+- `payment.completed` - Payment transaction completed successfully
+- `payment.failed` - Payment transaction failed
+- `payment.cancelled` - Payment cancelled (timeout, max attempts, etc.)
+
+#### OTP Events
+- `otp.generated` - OTP code generated and stored in Redis
+- `otp.verified` - OTP code verified successfully
+- `otp.expired` - OTP code expired
+- `otp.max_attempts` - Maximum OTP attempts exceeded
+
+#### User Events
+- `user.balance.updated` - User balance updated after transaction
+- `user.balance.insufficient` - Insufficient balance for transaction
+
+#### Saga Events
+- `saga.step.completed` - Saga step completed successfully
+- `saga.step.failed` - Saga step failed
+- `saga.compensate` - Saga compensation triggered
+- `saga.completed` - Entire saga completed successfully
+- `saga.failed` - Entire saga failed
+
+### API Response Format
+
+**Success Response:**
+```json
+{
+  "success": true,
+  "data": { ... }
+}
+```
+
+**Error Response:**
+```json
+{
+  "message": "Error description",
+  "errorCode": "ERROR_CODE",
+  "errorType": "ErrorType",
+  "details": "Additional error details",
+  "timestamp": "2025-10-27T14:30:00.000Z",
+  "service": "service-name"
+}
+```
 
 ## Sample Data
 
 The application includes sample data seeded automatically:
 
-### Users
-- **username**: `user1`, **password**: `password123`, **balance**: 10,000,000 VND
-- **username**: `user2`, **password**: `password123`, **balance**: 5,000,000 VND
-- **username**: `admin`, **password**: `admin123`, **balance**: 20,000,000 VND
+### Users (Auth Service)
+- **username**: `nhandang02`, **password**: `123456`, **email**: `thanhnhandang.it@gmail.com`
+- **username**: `admin`, **password**: `admin123`, **email**: `admin@example.com`
 
-### Students
-- **20110001** - Lê Văn C (5,000,000 VND)
-- **20110002** - Phạm Thị D (4,500,000 VND)
-- **20110003** - Hoàng Văn E (6,000,000 VND)
-- **20110004** - Trần Thị F (3,500,000 VND)
-- **20110005** - Nguyễn Văn G (7,000,000 VND)
+### Users (Users Service) 
+- **username**: `nhandang02`, **fullName**: `Dang Thanh Nhan`, **balance**: 1,998,500,000 VND
+- **username**: `admin`, **fullName**: `Admin User`, **balance**: 20,000,000 VND
 
-## Payment Flow
+### Students (Tuition Service)
+- **522H0006** - Dang Thanh Nhan (1,500,000 VND)
+- **522H0051** - Nguyen Thanh Nhan (2,000,000 VND)
 
-1. **Sign In** with username/password via Auth Service
-2. **Lookup Student** by student code via Tuition Service
-3. **Create Payment** preparation via Payment Service (validates balance via Users Service)
-4. **Generate OTP** via OTP Service (stored in Redis)
-5. **Send OTP Email** via Notification Service (triggered by RabbitMQ event)
-6. **Verify OTP** code via OTP Service
-7. **Execute Transaction** via Payment Service using Saga pattern:
-   - Deduct balance from Users Service
-   - Create transaction record in Payment Service
-   - Send confirmation email via Notification Service
-8. **Receive Confirmation** email with transaction details
+## Payment Flow (Saga Pattern)
 
-## Database Schema
+### HTTP API Calls (Client → API Gateway)
+1. **Sign In** - `POST /auth/signin`
+2. **Lookup Student** - `GET /tuition/:studentId`
+3. **Start Payment Saga** - `POST /payments`
+4. **Verify OTP** - `POST /otp/verify`
+5. **View Payment History** - `GET /payments/history`
+6. **View Saga Details** - `GET /payments/:paymentId/saga`
 
-### Auth Service Database (authdb)
-- **Users Table**: Authentication data, JWT tokens
-- **Refresh Tokens Table**: Refresh token management
+### Message Events (Service-to-Service via RabbitMQ)
+1. **Payment Created** - `payment.created` event published
+2. **OTP Generation** - `otp.generated` event triggers email sending
+3. **Email Notification** - Notification Service sends OTP email
+4. **OTP Verified** - `otp.verified` event triggers saga execution
+5. **Balance Update** - `user.balance.updated` event updates user balance
+6. **Payment Completed** - `payment.completed` event triggers confirmation email
+7. **Saga Events** - `saga.step.completed`, `saga.completed` events track progress
 
-### Users Service Database (usersdb)
-- **Users Table**: User profiles, balances, account information
-- **Transactions Table**: Transaction history and records
-
-### Tuition Service Database (tuition_db)
-- **Students Table**: Student information and tuition amounts
-- **Tuition Records Table**: Tuition payment history
-
-### Payment Service Database (payment_db)
-- **Payments Table**: Payment preparations and status
-- **Saga Table**: Distributed transaction state management
-- **Transactions Table**: Payment transaction records
-
-### Redis Cache
-- **OTP Storage**: Temporary OTP codes with expiry
-- **Session Cache**: User session data
-- **Rate Limiting**: API Gateway rate limiting data
+### Detailed Flow
+1. **Client** calls `POST /payments` → **API Gateway** → **Payment Service**
+2. **Payment Service** publishes `payment.created` event
+3. **OTP Service** receives event, generates OTP, publishes `otp.generated`
+4. **Notification Service** receives event, sends OTP email
+5. **Client** calls `POST /otp/verify` → **API Gateway** → **OTP Service**
+6. **OTP Service** publishes `otp.verified` event
+7. **Payment Service** receives event, executes saga steps
+8. **Users Service** receives `user.balance.updated` event, updates balance
+9. **Payment Service** publishes `payment.completed` event
+10. **Notification Service** receives event, sends confirmation email
 
 ## Security Features
 
@@ -316,41 +351,6 @@ The application includes sample data seeded automatically:
 - **Retry Mechanisms**: Automatic retry for transient failures
 - **Health Checks**: Service availability monitoring
 
-## Testing
-
-### Individual Service Testing
-```bash
-# Navigate to specific service directory
-cd services/auth-service
-
-# Install dependencies
-npm install
-
-# Run tests
-npm test
-npm run test:e2e
-npm run test:cov
-```
-
-### Full System Testing
-```bash
-# Start all services
-docker-compose up -d
-
-# Run integration tests
-npm test:e2e
-
-# Check service health
-curl http://localhost:4000/health
-```
-
-### Manual Testing
-1. Start the system: `docker-compose up -d`
-2. Access Swagger UI: http://localhost:4000/api
-3. Test authentication flow
-4. Test payment flow with sample data
-5. Monitor logs: `docker-compose logs -f`
-
 ## Development
 
 ### Local Development Setup
@@ -365,122 +365,14 @@ npm install
 # Run service in development mode
 npm run start:dev
 ```
-
-### Service Management Scripts
-```bash
-# Interactive service manager
-./scripts/start-service.sh
-
-# Start individual services
-./scripts/start-auth-service.sh
-./scripts/start-users-service.sh
-./scripts/start-tuition-service.sh
-./scripts/start-payment-service.sh
-./scripts/start-api-gateway.sh
-
-# Cleanup and reset
-./scripts/cleanup.sh
-```
-
 ### Monitoring and Debugging
 ```bash
 # View service logs
-docker-compose logs -f auth-service
-docker-compose logs -f payment-service
+docker-compose logs -f
 
 # Check service health
 curl http://localhost:4000/health
 
 # Access RabbitMQ management
 open http://localhost:15672
-
-# Connect to databases
-psql -h localhost -p 5433 -U postgres -d authdb
-psql -h localhost -p 5437 -U postgres -d usersdb
 ```
-
-## Deployment
-
-### Production Deployment
-```bash
-# Build all services
-docker-compose build
-
-# Start in production mode
-docker-compose up -d
-
-# Scale specific services
-docker-compose up -d --scale auth-service=2 --scale users-service=2
-```
-
-### Environment Configuration
-```bash
-# Production environment variables
-NODE_ENV=production
-JWT_SECRET=your-production-jwt-secret
-JWT_REFRESH_SECRET=your-production-refresh-secret
-SMTP_HOST=your-smtp-host
-SMTP_USER=your-smtp-user
-SMTP_PASS=your-smtp-password
-ALLOWED_ORIGINS=https://yourdomain.com
-```
-
-### Health Monitoring
-```bash
-# Check all services health
-curl http://localhost:4000/health
-
-# Monitor service logs
-docker-compose logs -f --tail=100
-
-# Check resource usage
-docker stats
-```
-
-### Backup and Recovery
-```bash
-# Backup databases
-docker exec auth_postgres pg_dump -U postgres authdb > auth_backup.sql
-docker exec users_postgres pg_dump -U postgres usersdb > users_backup.sql
-
-# Restore databases
-docker exec -i auth_postgres psql -U postgres authdb < auth_backup.sql
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### Services not starting
-```bash
-# Check service logs
-docker-compose logs service-name
-
-# Check port conflicts
-lsof -i :4000
-
-# Restart specific service
-docker-compose restart service-name
-```
-
-#### Database connection issues
-```bash
-# Check database health
-docker-compose ps
-
-# Connect to database directly
-docker exec -it auth_postgres psql -U postgres -d authdb
-```
-
-#### RabbitMQ issues
-```bash
-# Check RabbitMQ status
-docker exec ibanking_rabbitmq rabbitmq-diagnostics status
-
-# Reset RabbitMQ
-docker-compose restart rabbitmq
-```
-
-## License
-
-This project is licensed under the Nhan Dang License - see the LICENSE file for details.
