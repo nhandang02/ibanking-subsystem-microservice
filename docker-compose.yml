@@ -3,15 +3,15 @@ services:
     image: postgres:16-alpine
     container_name: auth_postgres
     environment:
-      POSTGRES_DB: authdb
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${AUTH_DB_NAME:-authdb}
+      POSTGRES_USER: ${AUTH_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:-password}
     ports:
-      - "5433:5432"
+      - "${AUTH_DB_PORT:-5433}:5432"
     volumes:
       - auth_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d authdb"]
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USERNAME:-postgres} -d ${AUTH_DB_NAME:-authdb}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -20,15 +20,15 @@ services:
     image: postgres:16-alpine
     container_name: tuition_postgres
     environment:
-      POSTGRES_DB: tuition_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${TUITION_DB_NAME:-tuition_db}
+      POSTGRES_USER: ${TUITION_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${TUITION_DB_PASSWORD:-password}
     ports:
-      - "5435:5432"
+      - "${TUITION_DB_PORT:-5435}:5432"
     volumes:
       - tuition_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d tuition_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${TUITION_DB_USERNAME:-postgres} -d ${TUITION_DB_NAME:-tuition_db}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -37,15 +37,15 @@ services:
     image: postgres:16-alpine
     container_name: payment_postgres
     environment:
-      POSTGRES_DB: payment_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${PAYMENT_DB_NAME:-payment_db}
+      POSTGRES_USER: ${PAYMENT_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${PAYMENT_DB_PASSWORD:-password}
     ports:
-      - "5436:5432"
+      - "${PAYMENT_DB_PORT:-5436}:5432"
     volumes:
       - payment_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d payment_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${PAYMENT_DB_USERNAME:-postgres} -d ${PAYMENT_DB_NAME:-payment_db}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -54,15 +54,15 @@ services:
     image: postgres:16-alpine
     container_name: users_postgres
     environment:
-      POSTGRES_DB: usersdb
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${USERS_DB_NAME:-usersdb}
+      POSTGRES_USER: ${USERS_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD:-password}
     ports:
-      - "5437:5432"
+      - "${USERS_DB_PORT:-5437}:5432"
     volumes:
       - users_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d usersdb"]
+      test: ["CMD-SHELL", "pg_isready -U ${USERS_DB_USERNAME:-postgres} -d ${USERS_DB_NAME:-usersdb}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -99,14 +99,8 @@ services:
       context: .
       dockerfile: ./services/auth-service/Dockerfile
     container_name: auth_service
-    environment:
-      PORT: 4001
-      DB_HOST: auth-postgres
-      DB_PORT: 5432
-      DB_USERNAME: postgres
-      DB_PASSWORD: password
-      DB_NAME: authdb
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    env_file:
+      - ./services/auth-service/.env
     depends_on:
       auth-postgres:
         condition: service_healthy
@@ -122,15 +116,8 @@ services:
       context: .
       dockerfile: ./services/users-service/Dockerfile
     container_name: users_service
-    environment:
-      PORT: 4005
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      DB_HOST: users-postgres
-      DB_PORT: 5432
-      DB_USERNAME: postgres
-      DB_PASSWORD: password
-      DB_NAME: usersdb\
-      SEED: "true"
+    env_file:
+      - ./services/users-service/.env
     depends_on:
       users-postgres:
         condition: service_healthy
@@ -145,15 +132,8 @@ services:
       context: .
       dockerfile: ./services/notification-service/Dockerfile
     container_name: notification_service
-    environment:
-      PORT: 4003
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASS: ${SMTP_PASS}
-      JWT_SECRET: ${JWT_SECRET}
+    env_file:
+      - ./services/notification-service/.env
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -168,11 +148,8 @@ services:
       context: .
       dockerfile: ./services/otp-service/Dockerfile
     container_name: otp_service
-    environment:
-      PORT: 4004
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET}
+    env_file:
+      - ./services/otp-service/.env
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -187,15 +164,8 @@ services:
       context: .
       dockerfile: ./services/tuition-service/Dockerfile
     container_name: tuition_service
-    environment:
-      PORT: 4006
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      DB_HOST: tuition-postgres
-      DB_PORT: 5432
-      DB_USERNAME: postgres
-      DB_PASSWORD: password
-      DB_NAME: tuition_db
-      SEED: "true"
+    env_file:
+      - ./services/tuition-service/.env
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -209,14 +179,8 @@ services:
       context: .
       dockerfile: ./services/payment-service/Dockerfile
     container_name: payment_service
-    environment:
-      PORT: 4007
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      DB_HOST: payment-postgres
-      DB_PORT: 5432
-      DB_USERNAME: postgres
-      DB_PASSWORD: password
-      DB_NAME: payment_db
+    env_file:
+      - ./services/payment-service/.env
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -230,16 +194,8 @@ services:
       context: .
       dockerfile: ./services/api-gateway/Dockerfile
     container_name: api_gateway
-    environment:
-      PORT: 4000
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
-      AUTH_SERVICE_URL: http://auth_service:4001
-      TUITION_SERVICE_URL: http://tuition_service:4006
-      PAYMENT_SERVICE_URL: http://payment_service:4007
-      # notification and otp services are accessed through payment service
+    env_file:
+      - ./services/api-gateway/.env
     depends_on:
       auth-service:
         condition: service_started

@@ -135,10 +135,10 @@ export class PaymentService {
             where: { paymentId: payment.id }
           });
 
-          if (saga && saga.status === 'pending') {
+          if (saga) {
             await this.sagaRepository.update(saga.id, {
               status: 'failed',
-              errorMessage: 'Payment timeout - automatically cancelled after 2 minutes',
+              errorMessage: 'Payment timeout - automatically cancelled after 5 minutes',
               updatedAt: new Date()
             });
           }
@@ -1005,7 +1005,7 @@ export class PaymentService {
             where: { paymentId: paymentId }
           });
           
-          if (saga && saga.status === 'pending') {
+          if (saga) {
             await this.sagaRepository.update(saga.id, {
               status: 'failed',
               errorMessage: 'Payment cancelled due to OTP expiry',
@@ -1055,7 +1055,7 @@ export class PaymentService {
             where: { paymentId: paymentId }
           });
           
-          if (saga && saga.status === 'pending') {
+          if (saga) {
             await this.sagaRepository.update(saga.id, {
               status: 'failed',
               errorMessage: 'Payment cancelled due to maximum OTP attempts exceeded',

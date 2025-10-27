@@ -13,6 +13,51 @@ import { RateLimitGuard } from './rate-limit/rate-limit.guard';
 export class AppController {
   constructor(private readonly appService: AppService) {}
 
+  // Helper method for consistent error handling
+  private handleError(error: any, serviceName: string = 'api-gateway'): HttpException {
+    // If it's already an HttpException with detailed error info, re-throw it
+    if (error instanceof HttpException) {
+      return error;
+    }
+    
+    // Extract meaningful error message from the error
+    let errorMessage = 'Internal server error';
+    let statusCode = 500;
+    let errorCode = 'INTERNAL_ERROR';
+    let errorType = 'InternalError';
+    
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      
+      // Map specific error types to appropriate HTTP status codes
+      if (error.message.includes('not found') || error.message.includes('not exist')) {
+        statusCode = 404;
+        errorCode = 'NOT_FOUND';
+        errorType = 'NotFoundError';
+      } else if (error.message.includes('required') || error.message.includes('validation') || error.message.includes('mismatch') || error.message.includes('Insufficient balance')) {
+        statusCode = 400;
+        errorCode = 'VALIDATION_ERROR';
+        errorType = 'ValidationError';
+      } else if (error.message.includes('unauthorized') || error.message.includes('forbidden')) {
+        statusCode = 401;
+        errorCode = 'UNAUTHORIZED';
+        errorType = 'AuthError';
+      }
+    }
+    
+    const errorResponse = {
+      message: errorMessage,
+      errorCode: errorCode,
+      errorType: errorType,
+      details: error.stack,
+      timestamp: new Date().toISOString(),
+      service: serviceName
+    };
+    
+    console.error(`Returning error to client: ${errorMessage} (${statusCode})`);
+    return new HttpException(errorResponse, statusCode);
+  }
+
   @Get('health')
   @ApiOperation({ summary: 'Health check for API Gateway and all services' })
   @ApiResponse({ status: 200, description: 'Health status of all services' })
@@ -27,28 +72,48 @@ export class AppController {
   @ApiResponse({ status: 200, description: 'Sign in successful' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   async signin(@Body() body: SigninDto, @Headers() headers: any, @Res() res: Response) {
-    // Map gateway DTO to auth-service expected payload
-    const payload = { username: (body as any).username ?? (body as any).usernameOrEmail, password: body.password };
-    const result = await this.appService.proxyRequest('auth', '/auth/signin', 'POST', payload, headers);
-    
-    // Forward cookies from auth service
-    if (result.cookies) {
-      result.cookies.forEach(cookie => {
-        const [nameValue, ...options] = cookie.split(';');
-        const [name, value] = nameValue.split('=');
-        if (name.trim() === 'refresh_token') {
-          res.cookie('refresh_token', value, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-        }
-      });
+    try {
+      // Map gateway DTO to auth-service expected payload
+      const payload = { username: (body as any).username ?? (body as any).usernameOrEmail, password: body.password };
+      const result = await this.appService.proxyRequest('auth', '/auth/signin', 'POST', payload, headers);
+      
+      // Check if auth service returned an error
+      if (result.success === false) {
+        const errorResponse = {
+          message: result.error || 'Authentication failed',
+          errorCode: result.errorCode || 'AUTH_FAILED',
+          errorType: result.errorType || 'AuthError',
+          details: result.details,
+          timestamp: result.timestamp,
+          service: 'auth-service'
+        };
+        
+        console.error(`Auth service error: ${result.error} (${result.status})`);
+        return res.status(result.status || 401).json(errorResponse);
+      }
+      
+      // Forward cookies from auth service
+      if (result.cookies) {
+        result.cookies.forEach(cookie => {
+          const [nameValue, ...options] = cookie.split(';');
+          const [name, value] = nameValue.split('=');
+          if (name.trim() === 'refresh_token') {
+            res.cookie('refresh_token', value, {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: 'strict',
+              maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            });
+          }
+        });
+      }
+      
+      // Return only the data, not the cookies
+      return res.json({ success: result.success, data: result.data });
+    } catch (error) {
+      console.error('Error in signin:', error);
+      throw this.handleError(error, 'auth-service');
     }
-    
-    // Return only the data, not the cookies
-    return res.json({ success: result.success, data: result.data });
   }
 
   @Post('auth/signup')
@@ -57,26 +122,46 @@ export class AppController {
   @ApiResponse({ status: 201, description: 'User created successfully' })
   @ApiResponse({ status: 400, description: 'Invalid input' })
   async signup(@Body() body: SignupDto, @Headers() headers: any, @Res() res: Response) {
-    const result = await this.appService.proxyRequest('auth', '/auth/signup', 'POST', body, headers);
-    
-    // Forward cookies from auth service
-    if (result.cookies) {
-      result.cookies.forEach(cookie => {
-        const [nameValue, ...options] = cookie.split(';');
-        const [name, value] = nameValue.split('=');
-        if (name.trim() === 'refresh_token') {
-          res.cookie('refresh_token', value, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-          });
-        }
-      });
+    try {
+      const result = await this.appService.proxyRequest('auth', '/auth/signup', 'POST', body, headers);
+      
+      // Check if auth service returned an error
+      if (result.success === false) {
+        const errorResponse = {
+          message: result.error || 'Registration failed',
+          errorCode: result.errorCode || 'REGISTRATION_FAILED',
+          errorType: result.errorType || 'AuthError',
+          details: result.details,
+          timestamp: result.timestamp,
+          service: 'auth-service'
+        };
+        
+        console.error(`Auth service error: ${result.error} (${result.status})`);
+        return res.status(result.status || 400).json(errorResponse);
+      }
+      
+      // Forward cookies from auth service
+      if (result.cookies) {
+        result.cookies.forEach(cookie => {
+          const [nameValue, ...options] = cookie.split(';');
+          const [name, value] = nameValue.split('=');
+          if (name.trim() === 'refresh_token') {
+            res.cookie('refresh_token', value, {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: 'strict',
+              maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            });
+          }
+        });
+      }
+      
+      // Return only the data, not the cookies
+      return res.json({ success: result.success, data: result.data });
+    } catch (error) {
+      console.error('Error in signup:', error);
+      throw this.handleError(error, 'auth-service');
     }
-    
-    // Return only the data, not the cookies
-    return res.json({ success: result.success, data: result.data });
   }
 
   @Get('auth/refresh')
@@ -85,35 +170,40 @@ export class AppController {
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Token refreshed successfully' })
   async refresh(@Req() req: Request, @Res() res: Response) {
-    console.log('🔍 Refresh token request received');
-    console.log('🍪 Cookies:', req.cookies);
-    console.log('📋 Headers:', req.headers);
-    
-    // Forward cookies to auth service
-    const headers = { ...req.headers };
-    // Don't override cookie header if it already exists
-    if (req.cookies?.refresh_token && !headers.cookie) {
-      headers.cookie = `refresh_token=${req.cookies.refresh_token}`;
-      console.log('✅ Forwarding refresh_token cookie');
-    } else if (req.cookies?.refresh_token) {
-      console.log('✅ Cookie already exists in headers');
-    } else {
-      console.log('❌ No refresh_token cookie found');
+    try {
+      console.log('🔍 Refresh token request received');
+      console.log('🍪 Cookies:', req.cookies);
+      console.log('📋 Headers:', req.headers);
+      
+      // Forward cookies to auth service
+      const headers = { ...req.headers };
+      // Don't override cookie header if it already exists
+      if (req.cookies?.refresh_token && !headers.cookie) {
+        headers.cookie = `refresh_token=${req.cookies.refresh_token}`;
+        console.log('✅ Forwarding refresh_token cookie');
+      } else if (req.cookies?.refresh_token) {
+        console.log('✅ Cookie already exists in headers');
+      } else {
+        console.log('❌ No refresh_token cookie found');
+      }
+      
+      const result = await this.appService.proxyRequest('auth', '/auth/refresh', 'GET', {}, headers);
+      // Handle cookie setting for refresh token
+      const refreshToken = result?.data?.refreshToken;
+      if (refreshToken) {
+        res.cookie('refreshToken', refreshToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+      }
+      // Return only the data, not the cookies
+      return res.json({ success: result.success, data: result.data });
+    } catch (error) {
+      console.error('Error in refresh:', error);
+      throw this.handleError(error, 'auth-service');
     }
-    
-    const result = await this.appService.proxyRequest('auth', '/auth/refresh', 'GET', {}, headers);
-    // Handle cookie setting for refresh token
-    const refreshToken = result?.data?.refreshToken;
-    if (refreshToken) {
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      });
-    }
-    // Return only the data, not the cookies
-    return res.json({ success: result.success, data: result.data });
   }
 
   @Post('auth/logout')
@@ -122,10 +212,15 @@ export class AppController {
   @ApiOperation({ summary: 'User logout' })
   @ApiResponse({ status: 200, description: 'Logout successful' })
   async logout(@Req() req: Request, @Res() res: Response) {
-    const result = await this.appService.proxyRequest('auth', '/auth/logout', 'POST', {}, req.headers);
-    res.clearCookie('refreshToken');
-    // Return only the data, not the cookies
-    return res.json({ success: result.success, data: result.data });
+    try {
+      const result = await this.appService.proxyRequest('auth', '/auth/logout', 'POST', {}, req.headers);
+      res.clearCookie('refreshToken');
+      // Return only the data, not the cookies
+      return res.json({ success: result.success, data: result.data });
+    } catch (error) {
+      console.error('Error in logout:', error);
+      throw this.handleError(error, 'auth-service');
+    }
   }
 
   @Get('auth/logout-all')
@@ -134,10 +229,15 @@ export class AppController {
   @ApiOperation({ summary: 'Logout from all devices' })
   @ApiResponse({ status: 200, description: 'Logout from all devices successful' })
   async logoutAll(@Req() req: Request, @Res() res: Response) {
-    const result = await this.appService.proxyRequest('auth', '/auth/logout-all', 'GET', {}, req.headers);
-    res.clearCookie('refreshToken');
-    // Return only the data, not the cookies
-    return res.json({ success: result.success, data: result.data });
+    try {
+      const result = await this.appService.proxyRequest('auth', '/auth/logout-all', 'GET', {}, req.headers);
+      res.clearCookie('refreshToken');
+      // Return only the data, not the cookies
+      return res.json({ success: result.success, data: result.data });
+    } catch (error) {
+      console.error('Error in logoutAll:', error);
+      throw this.handleError(error, 'auth-service');
+    }
   }
 
   @Get('auth/me')
@@ -146,10 +246,15 @@ export class AppController {
   @ApiOperation({ summary: 'Get current user profile' })
   @ApiResponse({ status: 200, description: 'User profile retrieved' })
   async getProfile(@Req() req: Request) {
-    console.log('🔍 /auth/me request received');
-    console.log('📋 Headers:', req.headers);
-    console.log('🔑 Authorization header:', req.headers.authorization);
-    return this.appService.proxyRequest('auth', '/auth/me', 'GET', {}, req.headers);
+    try {
+      console.log('🔍 /auth/me request received');
+      console.log('📋 Headers:', req.headers);
+      console.log('🔑 Authorization header:', req.headers.authorization);
+      return await this.appService.proxyRequest('auth', '/auth/me', 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getProfile:', error);
+      throw this.handleError(error, 'auth-service');
+    }
   }
 
   // Student Service Routes
@@ -160,7 +265,12 @@ export class AppController {
   @ApiResponse({ status: 200, description: 'Student information retrieved' })
   @ApiResponse({ status: 404, description: 'Student not found' })
   async getStudent(@Param('studentId') studentId: string, @Req() req: Request) {
-    return this.appService.proxyRequest('tuition', `/tuition/${studentId}`, 'GET', {}, req.headers);
+    try {
+      return await this.appService.proxyRequest('tuition', `/tuition/${studentId}`, 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getStudent:', error);
+      throw this.handleError(error, 'tuition-service');
+    }
   }
 
   @Get('tuition')
@@ -169,7 +279,12 @@ export class AppController {
   @ApiOperation({ summary: 'Get all Tuition' })
   @ApiResponse({ status: 200, description: 'Students list retrieved' })
   async getAllStudents(@Req() req: Request) {
-    return this.appService.proxyRequest('tuition', '/tuition', 'GET', {}, req.headers);
+    try {
+      return await this.appService.proxyRequest('tuition', '/tuition', 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getAllStudents:', error);
+      throw this.handleError(error, 'tuition-service');
+    }
   }
 
   // Saga Orchestrator Routes (replaces Payment Service)
@@ -225,39 +340,41 @@ export class AppController {
         const statusCode = result.status || 400;
         
         console.error(`Payment service error: ${errorMessage} (${statusCode})`);
-        throw new HttpException(errorMessage, statusCode);
+        
+        // Create detailed error response
+        const errorResponse = {
+          message: errorMessage,
+          errorCode: result.errorCode,
+          errorType: result.errorType,
+          details: result.details,
+          timestamp: result.timestamp,
+          service: 'payment-service'
+        };
+        
+        throw new HttpException(errorResponse, statusCode);
       } else if (result.success === true && result.data?.success === false) {
         // Nested error in saga response
         const errorMessage = result.data?.message || 'Payment saga failed';
         const statusCode = 400;
         
         console.error(`Payment saga error: ${errorMessage} (${statusCode})`);
-        throw new HttpException(errorMessage, statusCode);
+        
+        const errorResponse = {
+          message: errorMessage,
+          errorCode: result.data?.errorCode || 'SAGA_FAILED',
+          errorType: result.data?.errorType || 'SagaError',
+          details: result.data?.details,
+          timestamp: new Date().toISOString(),
+          service: 'payment-service'
+        };
+        
+        throw new HttpException(errorResponse, statusCode);
       }
       
       return result;
     } catch (error) {
       console.error('Error in createPayment:', error);
-      
-      // Extract meaningful error message from the error
-      let errorMessage = 'Internal server error';
-      let statusCode = 500;
-      
-      if (error instanceof Error) {
-        errorMessage = error.message;
-        
-        // Map specific error types to appropriate HTTP status codes
-        if (error.message.includes('not found') || error.message.includes('not exist')) {
-          statusCode = 404;
-        } else if (error.message.includes('required') || error.message.includes('validation') || error.message.includes('mismatch') || error.message.includes('Insufficient balance')) {
-          statusCode = 400;
-        } else if (error.message.includes('unauthorized') || error.message.includes('forbidden')) {
-          statusCode = 401;
-        }
-      }
-      
-      console.error(`Returning error to client: ${errorMessage} (${statusCode})`);
-      throw new HttpException(errorMessage, statusCode);
+      throw this.handleError(error, 'payment-service');
     }
   }
 
@@ -294,26 +411,7 @@ export class AppController {
       return this.appService.proxyRequest('payment', `/payments/resend-otp/${paymentId}`, 'POST', payload, req.headers);
     } catch (error) {
       console.error('Error in resendOtp:', error);
-      
-      // Extract meaningful error message from the error
-      let errorMessage = 'Internal server error';
-      let statusCode = 500;
-      
-      if (error instanceof Error) {
-        errorMessage = error.message;
-        
-        // Map specific error types to appropriate HTTP status codes
-        if (error.message.includes('not found') || error.message.includes('not exist')) {
-          statusCode = 404;
-        } else if (error.message.includes('required') || error.message.includes('validation') || error.message.includes('mismatch')) {
-          statusCode = 400;
-        } else if (error.message.includes('unauthorized') || error.message.includes('forbidden')) {
-          statusCode = 401;
-        }
-      }
-      
-      console.error(`Returning error to client: ${errorMessage} (${statusCode})`);
-      throw new HttpException(errorMessage, statusCode);
+      throw this.handleError(error, 'otp-service');
     }
   }
 
@@ -324,7 +422,12 @@ export class AppController {
   @ApiResponse({ status: 200, description: 'OTP verified successfully' })
   @ApiResponse({ status: 400, description: 'Invalid OTP' })
   async verifyOtp(@Body() body: VerifyOtpDto, @Req() req: Request) {
-    return this.appService.proxyRequest('payment', '/payments/verify-otp', 'POST', body, req.headers);
+    try {
+      return await this.appService.proxyRequest('payment', '/payments/verify-otp', 'POST', body, req.headers);
+    } catch (error) {
+      console.error('Error in verifyOtp:', error);
+      throw this.handleError(error, 'otp-service');
+    }
   }
 
 
@@ -334,7 +437,64 @@ export class AppController {
   @ApiOperation({ summary: 'Get OTP information for payment' })
   @ApiResponse({ status: 200, description: 'OTP info retrieved successfully' })
   async getOtpInfo(@Param('paymentId') paymentId: string, @Req() req: Request) {
-    return this.appService.proxyRequest('payment', `/payments/otp-info/${paymentId}`, 'GET', {}, req.headers);
+    try {
+      return await this.appService.proxyRequest('payment', `/payments/otp-info/${paymentId}`, 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getOtpInfo:', error);
+      throw this.handleError(error, 'otp-service');
+    }
+  }
+
+  // Payment History Routes - Must be before /payments/:paymentId to avoid route conflict
+  @Get('payments/history')
+  @UseGuards(AccessTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get payment history for current user' })
+  @ApiResponse({ status: 200, description: 'Payment history retrieved successfully' })
+  async getPaymentHistory(@Req() req: Request) {
+    try {
+      const user = (req as any).user;
+      const payerId = user?.data?.id;
+      
+      if (!payerId) {
+        throw new Error('User ID not found in request');
+      }
+      
+      return await this.appService.proxyRequest('payment', `/payments/payer/${payerId}`, 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getPaymentHistory:', error);
+      throw this.handleError(error, 'payment-service');
+    }
+  }
+
+  @Get('payments/:paymentId')
+  @UseGuards(AccessTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get payment details by ID' })
+  @ApiResponse({ status: 200, description: 'Payment details retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  async getPaymentDetails(@Param('paymentId') paymentId: string, @Req() req: Request) {
+    try {
+      return await this.appService.proxyRequest('payment', `/payments/${paymentId}`, 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getPaymentDetails:', error);
+      throw this.handleError(error, 'payment-service');
+    }
+  }
+
+  @Get('payments/:paymentId/saga')
+  @UseGuards(AccessTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get saga details by payment ID' })
+  @ApiResponse({ status: 200, description: 'Saga details retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Saga not found' })
+  async getSagaByPaymentId(@Param('paymentId') paymentId: string, @Req() req: Request) {
+    try {
+      return await this.appService.proxyRequest('payment', `/payments/payment/${paymentId}/saga`, 'GET', {}, req.headers);
+    } catch (error) {
+      console.error('Error in getSagaByPaymentId:', error);
+      throw this.handleError(error, 'payment-service');
+    }
   }
 
   // Notification Service Routes

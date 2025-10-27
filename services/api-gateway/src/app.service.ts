@@ -60,11 +60,36 @@ export class AppService {
       
       if (error.response) {
         // Service responded with error status
+        const errorData = error.response.data;
+        
+        // Map auth service specific error fields
+        let errorCode = errorData?.errorCode || errorData?.code;
+        if (!errorCode && errorData?.error) {
+          // Map auth service error field to errorCode
+          switch (errorData.error) {
+            case 'password':
+              errorCode = 'INVALID_PASSWORD';
+              break;
+            case 'username':
+              errorCode = 'INVALID_USERNAME';
+              break;
+            case 'user':
+              errorCode = 'USER_NOT_FOUND';
+              break;
+            default:
+              errorCode = 'AUTH_FAILED';
+          }
+        }
+        
         return {
           success: false,
           status: error.response.status,
-          error: error.response.data?.message || error.message,
-          data: error.response.data,
+          error: errorData?.message || error.message,
+          errorCode: errorCode,
+          errorType: errorData?.errorType || errorData?.type || 'AuthError',
+          details: errorData?.details || errorData?.stack,
+          data: errorData,
+          timestamp: new Date().toISOString(),
         };
       } else if (error.request) {
         // Service is unreachable
@@ -72,6 +97,9 @@ export class AppService {
           success: false,
           status: 503,
           error: `Service ${service} is unavailable`,
+          errorCode: 'SERVICE_UNAVAILABLE',
+          errorType: 'ServiceError',
+          timestamp: new Date().toISOString(),
         };
       } else {
         // Other error
@@ -79,6 +107,9 @@ export class AppService {
           success: false,
           status: 500,
           error: error.message,
+          errorCode: 'INTERNAL_ERROR',
+          errorType: 'InternalError',
+          timestamp: new Date().toISOString(),
         };
       }
     }

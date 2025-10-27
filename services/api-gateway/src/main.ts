@@ -38,10 +38,27 @@ async function bootstrap() {
   // Global error handling
   app.use((err: any, req: any, res: any, next: any) => {
     console.error('Global error:', err);
-    res.status(err.status || 500).json({
-      message: err.message || 'Internal server error',
-      statusCode: err.status || 500,
-    });
+    
+    // If error is already formatted with detailed info, use it
+    if (err.response && typeof err.response === 'object') {
+      res.status(err.status || 500).json({
+        ...err.response,
+        timestamp: err.response.timestamp || new Date().toISOString(),
+        path: req.url,
+        method: req.method
+      });
+    } else {
+      // Default error format
+      res.status(err.status || 500).json({
+        message: err.message || 'Internal server error',
+        statusCode: err.status || 500,
+        errorCode: err.errorCode || 'INTERNAL_ERROR',
+        errorType: err.errorType || 'InternalError',
+        timestamp: new Date().toISOString(),
+        path: req.url,
+        method: req.method
+      });
+    }
   });
 
   await app.listen(process.env.PORT || 4000);

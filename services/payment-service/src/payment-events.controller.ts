@@ -307,7 +307,7 @@ export class PaymentEventsController {
         
         // Update saga status to failed if exists
         const saga = await this.paymentService.getSagaByPaymentId(paymentId);
-        if (saga && saga.status === 'pending') {
+        if (saga) {
           await this.paymentService.updateSagaStatus(saga.id, 'failed', reason);
         }
         

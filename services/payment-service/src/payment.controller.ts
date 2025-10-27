@@ -145,6 +145,28 @@ export class PaymentController {
     }
   }
 
+  @Get('payment/:paymentId/saga')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get saga by payment ID' })
+  @ApiResponse({ status: 200, description: 'Saga retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Saga not found' })
+  async getSagaByPaymentId(@Param('paymentId') paymentId: string) {
+    try {
+      const saga = await this.paymentService.getSagaByPaymentId(paymentId);
+      if (!saga) {
+        throw new HttpException('Saga not found for this payment', HttpStatus.NOT_FOUND);
+      }
+      return {
+        success: true,
+        data: saga
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get saga for payment ${paymentId}:`, error);
+      if (error instanceof HttpException) throw error;
+      throw new HttpException('Failed to retrieve saga', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Get('sagas/all')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get all sagas' })

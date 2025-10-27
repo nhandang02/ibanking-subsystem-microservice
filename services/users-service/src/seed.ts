@@ -48,7 +48,7 @@ async function run() {
       email: '0982717527dtn@gmail.com',
       fullName: 'Dang Thanh Nhan',
       phoneNumber: '+84 112345677',
-      availableBalance: '4000000000.00',
+      availableBalance: '3000000.00',
     },
   ];
   await repo.save(users.map((u) => repo.create(u)));
