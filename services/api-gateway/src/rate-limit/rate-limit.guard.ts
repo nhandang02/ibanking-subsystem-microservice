@@ -53,7 +53,7 @@ export class RateLimitGuard implements CanActivate {
   private getRateLimitConfig(endpoint: string): { limit: number; windowMs: number } {
     // Different rate limits for different endpoints
     if (endpoint.includes('/auth/signin') || endpoint.includes('/auth/signup')) {
-      return { limit: 5, windowMs: 15 * 60 * 1000 }; // 5 requests per 15 minutes
+      return { limit: 50, windowMs: 15 * 60 * 1000 }; // 5 requests per 15 minutes
     }
     
     if (endpoint.includes('/otp/')) {
