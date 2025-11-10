@@ -100,6 +100,66 @@ export class PaymentService {
     return false;
   }
 
+  // Account Locking Methods - prevent same account from processing multiple payments simultaneously
+  private async acquireAccountLock(payerId: string, timeoutMs: number = 30000): Promise<boolean> {
+    if (!this.redisClient) {
+      this.logger.warn('Redis client not available, skipping account lock');
+      return true; // Allow operation if Redis is down
+    }
+
+    const lockKey = `payment_account_lock:${payerId}`;
+    const lockValue = `${Date.now()}-${Math.random()}`;
+    
+    try {
+      // Try to acquire lock with expiration
+      const result = await this.redisClient.set(lockKey, lockValue, {
+        PX: timeoutMs, // Expire after timeout
+        NX: true       // Only set if not exists
+      });
+      
+      if (result === 'OK') {
+        this.logger.log(`🔒 [ACCOUNT_LOCK] Acquired lock for account ${payerId}`);
+        return true;
+      } else {
+        this.logger.warn(`🔒 [ACCOUNT_LOCK] Failed to acquire lock for account ${payerId} - already locked`);
+        return false;
+      }
+    } catch (error) {
+      this.logger.error(`🔒 [ACCOUNT_LOCK] Error acquiring lock for account ${payerId}:`, error);
+      return false;
+    }
+  }
+
+  private async releaseAccountLock(payerId: string): Promise<void> {
+    if (!this.redisClient) return;
+
+    const lockKey = `payment_account_lock:${payerId}`;
+    
+    try {
+      await this.redisClient.del(lockKey);
+      this.logger.log(`🔓 [ACCOUNT_LOCK] Released lock for account ${payerId}`);
+    } catch (error) {
+      this.logger.error(`🔓 [ACCOUNT_LOCK] Error releasing lock for account ${payerId}:`, error);
+    }
+  }
+
+  private async waitForAccountLock(payerId: string, maxWaitMs: number = 10000): Promise<boolean> {
+    const startTime = Date.now();
+    const checkInterval = 100; // Check every 100ms
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      const acquired = await this.acquireAccountLock(payerId);
+      if (acquired) {
+        return true;
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+    
+    return false;
+  }
+
   // Cleanup timeout payments - runs every minute
   @Cron(CronExpression.EVERY_MINUTE)
   async cleanupTimeoutPayments() {
@@ -145,8 +205,9 @@ export class PaymentService {
 
           this.logger.log(`✅ [CLEANUP] Cancelled timeout payment: ${payment.id} for student: ${payment.studentId}`);
           
-          // Release Redis lock if exists
+          // Release Redis locks if exists
           await this.releaseLock(payment.studentId);
+          await this.releaseAccountLock(payment.payerId);
           
         } catch (error) {
           this.logger.error(`❌ [CLEANUP] Failed to cancel payment ${payment.id}:`, error.message);
@@ -449,6 +510,20 @@ export class PaymentService {
       throw new BadRequestException(`Đã có thanh toán đang chờ xử lý cho studentId ${paymentData.studentId}. Vui lòng đợi thanh toán hiện tại hoàn thành.`);
     }
 
+    // Check if there's already a pending payment for this account (payerId)
+    this.logger.log(`🔍 [CREATE_PAYMENT] Checking for existing pending payments for account ${paymentData.payerId}...`);
+    const existingAccountPayment = await this.paymentRepository.findOne({
+      where: { 
+        payerId: paymentData.payerId,
+        status: 'pending'
+      }
+    });
+    
+    if (existingAccountPayment) {
+      this.logger.error(`❌ [CREATE_PAYMENT] Payment already exists for account ${paymentData.payerId}:`, existingAccountPayment.id);
+      throw new BadRequestException(`Bạn đang có một thanh toán đang chờ xử lý. Vui lòng đợi thanh toán hiện tại hoàn thành trước khi tạo thanh toán mới.`);
+    }
+
     // Check if there's already a completed payment for this student (tuition already paid)
     // But only if the current tuition amount is 0 (meaning it's already paid)
     const completedPayment = await this.paymentRepository.findOne({
@@ -464,12 +539,25 @@ export class PaymentService {
       // If tuition amount > 0, it means there's new tuition to pay
     }
 
+    // Acquire distributed lock for this account to prevent concurrent payments from same account
+    this.logger.log(`🔒 [CREATE_PAYMENT] Acquiring account lock for payer ${paymentData.payerId}...`);
+    const accountLockAcquired = await this.waitForAccountLock(paymentData.payerId, 15000); // Wait up to 15 seconds
+    
+    if (!accountLockAcquired) {
+      this.logger.error(`❌ [CREATE_PAYMENT] Failed to acquire account lock for payer ${paymentData.payerId} - another payment is in progress`);
+      throw new BadRequestException('Bạn đang có một thanh toán đang được xử lý. Vui lòng đợi thanh toán hiện tại hoàn thành.');
+    }
+    
+    this.logger.log(`✅ [CREATE_PAYMENT] Account lock acquired for payer ${paymentData.payerId}`);
+
     // Acquire distributed lock for this student to prevent concurrent payments
     this.logger.log(`🔒 [CREATE_PAYMENT] Acquiring lock for student ${paymentData.studentId}...`);
     const lockAcquired = await this.waitForLock(paymentData.studentId, 15000); // Wait up to 15 seconds
     
     if (!lockAcquired) {
       this.logger.error(`❌ [CREATE_PAYMENT] Failed to acquire lock for student ${paymentData.studentId} - another payment is in progress`);
+      // Release account lock before throwing error
+      await this.releaseAccountLock(paymentData.payerId);
       throw new BadRequestException('Another payment is currently being processed for this student. Please try again in a moment.');
     }
     
@@ -565,9 +653,10 @@ export class PaymentService {
       }
       throw new BadRequestException(`Payment creation failed: ${error.message}`);
     } finally {
-      // Always release the lock, regardless of success or failure
-      this.logger.log(`🔓 [CREATE_PAYMENT] Releasing lock for student ${paymentData.studentId}...`);
+      // Always release both locks, regardless of success or failure
+      this.logger.log(`🔓 [CREATE_PAYMENT] Releasing locks for student ${paymentData.studentId} and account ${paymentData.payerId}...`);
       await this.releaseLock(paymentData.studentId);
+      await this.releaseAccountLock(paymentData.payerId);
     }
   }
 
@@ -1084,6 +1173,10 @@ export class PaymentService {
 
           this.logger.log(`✅ [VERIFY_OTP] Saga completed successfully after OTP verification`);
 
+          // Release account lock after successful payment
+          await this.releaseAccountLock(payment.payerId);
+          await this.releaseLock(payment.studentId);
+
           return {
             paymentId: paymentId,
             status: 'completed',
@@ -1137,6 +1230,10 @@ export class PaymentService {
 
         this.logger.log(`Transaction executed successfully:`, transactionResult);
 
+        // Release account lock after successful payment
+        await this.releaseAccountLock(payment.payerId);
+        await this.releaseLock(payment.studentId);
+
         return {
           paymentId: paymentId,
           status: 'completed',
@@ -1187,11 +1284,12 @@ export class PaymentService {
             });
           }
           
-          // Release Redis lock (with error handling)
+          // Release Redis locks (with error handling)
           try {
             await this.releaseLock(payment.studentId);
+            await this.releaseAccountLock(payment.payerId);
           } catch (lockError) {
-            this.logger.warn(`⚠️ [OTP_EXPIRED] Failed to release lock for student ${payment.studentId}:`, lockError.message);
+            this.logger.warn(`⚠️ [OTP_EXPIRED] Failed to release locks:`, lockError.message);
             // Don't throw error for lock release failure
           }
           
@@ -1237,11 +1335,12 @@ export class PaymentService {
             });
           }
           
-          // Release Redis lock (with error handling)
+          // Release Redis locks (with error handling)
           try {
             await this.releaseLock(payment.studentId);
+            await this.releaseAccountLock(payment.payerId);
           } catch (lockError) {
-            this.logger.warn(`⚠️ [MAX_ATTEMPTS] Failed to release lock for student ${payment.studentId}:`, lockError.message);
+            this.logger.warn(`⚠️ [MAX_ATTEMPTS] Failed to release locks:`, lockError.message);
             // Don't throw error for lock release failure
           }
           
@@ -1570,12 +1669,13 @@ export class PaymentService {
       // Don't throw, OTP will expire anyway
     }
 
-    // Release lock
+    // Release locks
     try {
       await this.releaseLock(payment.studentId);
-      this.logger.log(`✅ [CANCEL_PAYMENT] Lock released for student ${payment.studentId}`);
+      await this.releaseAccountLock(payment.payerId);
+      this.logger.log(`✅ [CANCEL_PAYMENT] Locks released for student ${payment.studentId} and account ${payment.payerId}`);
     } catch (error) {
-      this.logger.warn(`⚠️ [CANCEL_PAYMENT] Failed to release lock: ${error.message}`);
+      this.logger.warn(`⚠️ [CANCEL_PAYMENT] Failed to release locks: ${error.message}`);
     }
 
     // Publish cancellation event
