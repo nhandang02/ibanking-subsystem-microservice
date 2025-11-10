@@ -73,19 +73,37 @@ export class PaymentController {
 
   @Post(':id/cancel')
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Cancel payment' })
+  @ApiOperation({ summary: 'Cancel payment by user' })
   @ApiResponse({ status: 200, description: 'Payment cancelled successfully' })
+  @ApiResponse({ status: 400, description: 'Payment cannot be cancelled (already completed/failed/cancelled or not owner)' })
   @ApiResponse({ status: 404, description: 'Payment not found' })
-  async cancelPayment(@Param('id') id: string) {
+  async cancelPayment(@Param('id') id: string, @Body() body: { payerId?: string }, @Req() req: Request) {
     try {
-      await this.paymentService.cancelPayment(id);
+      // Get payerId from body (passed from API Gateway) or from request (if direct call with auth guard)
+      const payerId = body?.payerId || (req as any).user?.data?.id;
+      
+      if (!payerId) {
+        throw new HttpException('User ID not found in request', HttpStatus.UNAUTHORIZED);
+      }
+
+      await this.paymentService.cancelPayment(id, 'Payment cancelled by user', payerId);
       return {
         success: true,
         message: 'Payment cancelled successfully'
       };
     } catch (error) {
       this.logger.error(`Failed to cancel payment ${id}:`, error);
-      throw new HttpException('Failed to cancel payment', HttpStatus.INTERNAL_SERVER_ERROR);
+      if (error instanceof HttpException) throw error;
+      
+      // Map error types
+      let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+      if (error.message.includes('not found')) {
+        statusCode = HttpStatus.NOT_FOUND;
+      } else if (error.message.includes('Cannot cancel') || error.message.includes('permission')) {
+        statusCode = HttpStatus.BAD_REQUEST;
+      }
+      
+      throw new HttpException(error.message || 'Failed to cancel payment', statusCode);
     }
   }
 

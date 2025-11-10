@@ -58,12 +58,12 @@ export class AppController {
     return new HttpException(errorResponse, statusCode);
   }
 
-  @Get('health')
-  @ApiOperation({ summary: 'Health check for API Gateway and all services' })
-  @ApiResponse({ status: 200, description: 'Health status of all services' })
-  async healthCheck() {
-    return this.appService.healthCheck();
-  }
+  // @Get('health')
+  // @ApiOperation({ summary: 'Health check for API Gateway and all services' })
+  // @ApiResponse({ status: 200, description: 'Health status of all services' })
+  // async healthCheck() {
+  //   return this.appService.healthCheck();
+  // }
 
   // Auth Service Routes
   @Post('auth/signin')
@@ -493,6 +493,32 @@ export class AppController {
       return await this.appService.proxyRequest('payment', `/payments/payment/${paymentId}/saga`, 'GET', {}, req.headers);
     } catch (error) {
       console.error('Error in getSagaByPaymentId:', error);
+      throw this.handleError(error, 'payment-service');
+    }
+  }
+
+  @Post('payments/:paymentId/cancel')
+  @UseGuards(AccessTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Cancel payment by user' })
+  @ApiResponse({ status: 200, description: 'Payment cancelled successfully' })
+  @ApiResponse({ status: 400, description: 'Payment cannot be cancelled (already completed/failed/cancelled or not owner)' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  async cancelPayment(@Param('paymentId') paymentId: string, @Req() req: Request) {
+    try {
+      const user = (req as any).user;
+      const payerId = user?.data?.id;
+      
+      if (!payerId) {
+        throw new Error('User ID not found in request. Please ensure you are authenticated.');
+      }
+
+      // Pass payerId in body so Payment Service can validate ownership
+      const payload = { payerId };
+
+      return await this.appService.proxyRequest('payment', `/payments/${paymentId}/cancel`, 'POST', payload, req.headers);
+    } catch (error) {
+      console.error('Error in cancelPayment:', error);
       throw this.handleError(error, 'payment-service');
     }
   }

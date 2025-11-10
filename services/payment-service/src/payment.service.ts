@@ -181,9 +181,10 @@ export class PaymentService {
     });
 
     const steps = [
-      { id: 'create_payment', action: 'createPayment', compensation: 'cancelPayment', status: 'pending' as const, retryCount: 0, maxRetries: 3 }
-      // Note: OTP generation and email sending are handled automatically via events
-      // Note: execute_transaction step is removed - will be triggered by OTP verification
+      { id: 'create_payment', action: 'createPayment', compensation: 'cancelPayment', status: 'pending' as const, retryCount: 0, maxRetries: 3 },
+      { id: 'generate_and_send_otp', action: 'generateAndSendOtp', compensation: 'clearOtp', status: 'pending' as const, retryCount: 0, maxRetries: 3 },
+      { id: 'wait_otp_verification', action: 'waitForOtpVerification', compensation: null, status: 'pending' as const, retryCount: 0, maxRetries: 0 },
+      { id: 'execute_transaction', action: 'executeTransaction', compensation: 'rollbackTransaction', status: 'pending' as const, retryCount: 0, maxRetries: 3 }
     ];
 
     // Create saga record in database
@@ -216,16 +217,48 @@ export class PaymentService {
         
         this.logger.log(`⚡ [PAYMENT_SAGA] Executing step ${i + 1}/${steps.length}: ${step.id}`);
         
+        // Special handling for wait_otp_verification step
+        if (step.id === 'wait_otp_verification') {
+          this.logger.log(`⏳ [PAYMENT_SAGA] Pausing saga at step: wait_otp_verification. Waiting for OTP verification...`);
+          
+          // Mark wait step as completed (it's just a marker step)
+          const completedStep = { ...step, status: 'completed', result: { status: 'waiting' }, completedAt: new Date() };
+          completedSteps.push(completedStep);
+          
+          // Update saga in database - pause here, will continue after OTP verification
+          // Only include steps that are actually completed
+          this.logger.log(`📋 [PAYMENT_SAGA] Completed steps so far: ${completedSteps.length}`, completedSteps.map(s => s.id));
+          
+          await this.sagaRepository.update(sagaId, {
+            currentStepIndex: i + 1, // Move to next step (execute_transaction) but don't execute yet
+            completedSteps: [...completedSteps], // Only include steps that are actually completed
+            steps: steps.map((s, index) => 
+              index === i ? { ...s, status: 'completed' as const, completedAt: new Date() } : s
+            ),
+            status: 'pending' // Keep as pending until OTP is verified
+          });
+          
+          this.logger.log(`✅ [PAYMENT_SAGA] Saga paused. Waiting for OTP verification to continue...`);
+          return {
+            success: true,
+            sagaId,
+            paymentId,
+            message: 'Payment saga paused. Please verify OTP to continue.'
+          };
+        }
+        
         try {
           const result = await this.executeStep(step, { ...paymentData, paymentId });
           const completedStep = { ...step, status: 'completed', result, completedAt: new Date() };
           completedSteps.push(completedStep);
           
-          // Update saga in database
+          // Update saga in database - only update completedSteps with steps that are actually completed
           this.logger.log(`💾 [PAYMENT_SAGA] Updating saga record after step completion...`);
+          this.logger.log(`📋 [PAYMENT_SAGA] Completed steps so far: ${completedSteps.length}`, completedSteps.map(s => s.id));
+          
           await this.sagaRepository.update(sagaId, {
             currentStepIndex: i + 1,
-            completedSteps: completedSteps,
+            completedSteps: [...completedSteps], // Only include steps that are actually completed
             steps: steps.map((s, index) => 
               index === i ? { ...s, status: 'completed' as const, completedAt: new Date() } : s
             )
@@ -265,7 +298,6 @@ export class PaymentService {
       });
       
       this.logger.log(`🎉 [PAYMENT_SAGA] Payment saga completed successfully: ${sagaId}`);
-      this.logger.log(`📧 [PAYMENT_SAGA] OTP generation and email sending will be handled automatically via events`);
       return {
         success: true,
         sagaId,
@@ -301,6 +333,20 @@ export class PaymentService {
           amount: paymentData.amount
         });
       
+      case 'generateAndSendOtp':
+        this.logger.log(`🔐 [EXECUTE_STEP] Generating and sending OTP for payment: ${paymentData.paymentId}`);
+        return await this.generateAndSendOtpForPayment({
+          paymentId: paymentData.paymentId,
+          userEmail: paymentData.userEmail,
+          studentId: paymentData.studentId
+        });
+      
+      case 'waitForOtpVerification':
+        this.logger.log(`⏳ [EXECUTE_STEP] Waiting for OTP verification for payment: ${paymentData.paymentId}`);
+        // This step doesn't actually execute anything, it just marks that we're waiting
+        // The saga will continue when OTP is verified via verifyOtpAndCompletePayment
+        return { status: 'waiting', message: 'Waiting for OTP verification' };
+      
       case 'executeTransaction':
         this.logger.log(`💰 [EXECUTE_STEP] Executing transaction for payment: ${paymentData.paymentId}`);
         return await this.executeTransaction(paymentData);
@@ -334,7 +380,20 @@ export class PaymentService {
     switch (step.compensation) {
       case 'cancelPayment':
         this.logger.log(`❌ [EXECUTE_COMPENSATION] Cancelling payment: ${paymentData.paymentId}`);
-        await this.cancelPayment(paymentData.paymentId);
+        // Skip saga compensation to avoid infinite loop - payment is already being cancelled
+        await this.cancelPayment(paymentData.paymentId, 'Payment cancelled during saga compensation', undefined, true);
+        break;
+      case 'clearOtp':
+        this.logger.log(`🧹 [EXECUTE_COMPENSATION] Clearing OTP for payment: ${paymentData.paymentId}`);
+        // OTP will be cleared automatically when payment is cancelled
+        // But we can explicitly clear it if needed
+        try {
+          await this.microservicesClient.clearOtp(paymentData.paymentId);
+          this.logger.log(`✅ [EXECUTE_COMPENSATION] OTP cleared successfully`);
+        } catch (error) {
+          this.logger.warn(`⚠️ [EXECUTE_COMPENSATION] Failed to clear OTP: ${error.message}`);
+          // Don't throw, just log - OTP will expire anyway
+        }
         break;
       case 'rollbackTransaction':
         this.logger.log(`🔄 [EXECUTE_COMPENSATION] Rolling back transaction: ${paymentData.paymentId}`);
@@ -496,12 +555,7 @@ export class PaymentService {
       const savedPayment = await this.paymentRepository.save(payment);
       this.logger.log('✅ [CREATE_PAYMENT] Payment saved successfully:', { id: savedPayment.id, status: savedPayment.status });
       
-      // Generate OTP immediately after creating payment
-      // OTP Service will automatically send email via publishOtpEvent
-      this.logger.log('🔐 [CREATE_PAYMENT] Generating OTP immediately...');
-      const otp = await this.generateOtpForPayment(savedPayment.id, user.email, paymentData.studentId);
-      this.logger.log('✅ [CREATE_PAYMENT] OTP generated and email sent automatically by OTP Service:', { otp: otp.substring(0, 2) + '****' });
-      
+      // Note: OTP generation and email sending will be handled in the next saga step
       this.logger.log('🎉 [CREATE_PAYMENT] Payment creation completed successfully');
       return savedPayment;
     } catch (error) {
@@ -718,6 +772,31 @@ export class PaymentService {
       }
     } catch (error) {
       this.logger.error(`💥 [GENERATE_OTP] Failed to generate OTP via OTP Service: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // Generate and send OTP for payment (saga step)
+  private async generateAndSendOtpForPayment(paymentData: {
+    paymentId: string;
+    userEmail: string;
+    studentId: string;
+  }): Promise<any> {
+    this.logger.log(`🔐 [GENERATE_AND_SEND_OTP] Generating and sending OTP for payment: ${paymentData.paymentId}`);
+    
+    try {
+      // Generate OTP - OTP Service will automatically publish event to send email via Notification Service
+      const otp = await this.generateOtpForPayment(paymentData.paymentId, paymentData.userEmail, paymentData.studentId);
+      this.logger.log(`✅ [GENERATE_AND_SEND_OTP] OTP generated and email sent automatically by OTP Service`);
+      
+      return {
+        paymentId: paymentData.paymentId,
+        otpGenerated: true,
+        emailSent: true,
+        message: 'OTP generated and email sent successfully'
+      };
+    } catch (error) {
+      this.logger.error(`💥 [GENERATE_AND_SEND_OTP] Failed to generate and send OTP: ${error.message}`);
       throw error;
     }
   }
@@ -945,30 +1024,125 @@ export class PaymentService {
 
       this.logger.log(`OTP verified successfully for payment: ${paymentId}`);
 
-      // Get user email from Users Service
-      this.logger.log(`📧 [VERIFY_OTP] Getting user email for payerId: ${payment.payerId}`);
-      const userInfo = await this.callService('users', 'get', { userId: payment.payerId });
-      this.logger.log(`📧 [VERIFY_OTP] User info:`, userInfo);
-      
-      if (!userInfo || !userInfo.success || !userInfo.data || !userInfo.data.email) {
-        throw new Error('User email not found');
-      }
-
-      // Execute the actual transaction (deduct balance)
-      const transactionResult = await this.executeTransaction({
-        paymentId: paymentId,
-        payerId: payment.payerId,
-        amount: payment.tuitionAmount,
-        userEmail: userInfo.data.email
+      // Find the saga for this payment
+      const saga = await this.sagaRepository.findOne({
+        where: { paymentId: paymentId }
       });
 
-      this.logger.log(`Transaction executed successfully:`, transactionResult);
+      if (saga) {
+        this.logger.log(`🔄 [VERIFY_OTP] Found saga ${saga.id}, continuing saga execution...`);
+        
+        // Get user email from Users Service
+        this.logger.log(`📧 [VERIFY_OTP] Getting user email for payerId: ${payment.payerId}`);
+        const userInfo = await this.callService('users', 'get', { userId: payment.payerId });
+        this.logger.log(`📧 [VERIFY_OTP] User info:`, userInfo);
+        
+        if (!userInfo || !userInfo.success || !userInfo.data || !userInfo.data.email) {
+          throw new Error('User email not found');
+        }
 
-      return {
-        paymentId: paymentId,
-        status: 'completed',
-        message: 'Payment completed successfully'
-      };
+        // Continue saga from execute_transaction step
+        const executeStepIndex = saga.steps.findIndex(s => s.id === 'execute_transaction');
+        if (executeStepIndex === -1) {
+          throw new Error('execute_transaction step not found in saga');
+        }
+
+        this.logger.log(`💰 [VERIFY_OTP] Continuing saga with execute_transaction step...`);
+        
+        try {
+          // Execute the transaction step
+          const transactionResult = await this.executeTransaction({
+            paymentId: paymentId,
+            payerId: payment.payerId,
+            amount: payment.tuitionAmount,
+            userEmail: userInfo.data.email
+          });
+
+          this.logger.log(`Transaction executed successfully:`, transactionResult);
+
+          // Update saga - mark execute_transaction as completed
+          // Only include steps that are actually completed
+          const updatedCompletedSteps = [...(saga.completedSteps || [])];
+          const executeStep = saga.steps[executeStepIndex];
+          updatedCompletedSteps.push({
+            ...executeStep,
+            status: 'completed',
+            result: transactionResult,
+            completedAt: new Date()
+          });
+
+          this.logger.log(`📋 [VERIFY_OTP] Completed steps after transaction: ${updatedCompletedSteps.length}`, updatedCompletedSteps.map(s => s.id));
+
+          await this.sagaRepository.update(saga.id, {
+            status: 'completed',
+            currentStepIndex: executeStepIndex + 1,
+            completedSteps: updatedCompletedSteps, // Only include steps that are actually completed
+            steps: saga.steps.map((s, index) => 
+              index === executeStepIndex ? { ...s, status: 'completed' as const, completedAt: new Date() } : s
+            )
+          });
+
+          this.logger.log(`✅ [VERIFY_OTP] Saga completed successfully after OTP verification`);
+
+          return {
+            paymentId: paymentId,
+            status: 'completed',
+            sagaId: saga.id,
+            message: 'Payment completed successfully'
+          };
+        } catch (error) {
+          this.logger.error(`❌ [VERIFY_OTP] Failed to execute transaction step: ${error.message}`);
+          
+          // Update saga status to failed
+          await this.sagaRepository.update(saga.id, {
+            status: 'failed',
+            errorMessage: error.message,
+            steps: saga.steps.map((s, index) => 
+              index === executeStepIndex ? { ...s, status: 'failed' as const, error: error.message } : s
+            )
+          });
+
+          // Start compensation
+          this.logger.log(`🔄 [VERIFY_OTP] Starting compensation for saga: ${saga.id}`);
+          await this.compensateSaga(saga.completedSteps || [], {
+            paymentId: paymentId,
+            payerId: payment.payerId,
+            studentId: payment.studentId,
+            amount: payment.tuitionAmount,
+            userEmail: userInfo.data.email
+          });
+
+          throw error;
+        }
+      } else {
+        // No saga found, execute transaction directly (backward compatibility)
+        this.logger.log(`⚠️ [VERIFY_OTP] No saga found for payment ${paymentId}, executing transaction directly...`);
+        
+        // Get user email from Users Service
+        this.logger.log(`📧 [VERIFY_OTP] Getting user email for payerId: ${payment.payerId}`);
+        const userInfo = await this.callService('users', 'get', { userId: payment.payerId });
+        this.logger.log(`📧 [VERIFY_OTP] User info:`, userInfo);
+        
+        if (!userInfo || !userInfo.success || !userInfo.data || !userInfo.data.email) {
+          throw new Error('User email not found');
+        }
+
+        // Execute the actual transaction (deduct balance)
+        const transactionResult = await this.executeTransaction({
+          paymentId: paymentId,
+          payerId: payment.payerId,
+          amount: payment.tuitionAmount,
+          userEmail: userInfo.data.email
+        });
+
+        this.logger.log(`Transaction executed successfully:`, transactionResult);
+
+        return {
+          paymentId: paymentId,
+          status: 'completed',
+          message: 'Payment completed successfully'
+        };
+      }
 
     } catch (error) {
       this.logger.error(`OTP verification failed for payment ${paymentId}:`, error);
@@ -1329,25 +1503,91 @@ export class PaymentService {
     });
   }
 
-  async cancelPayment(paymentId: string, reason?: string): Promise<void> {
-    this.logger.log(`Cancelling payment: ${paymentId}, reason: ${reason}`);
+  async cancelPayment(paymentId: string, reason?: string, payerId?: string, skipSagaCompensation: boolean = false): Promise<void> {
+    this.logger.log(`🚫 [CANCEL_PAYMENT] Cancelling payment: ${paymentId}, reason: ${reason || 'User cancelled'}, skipSagaCompensation: ${skipSagaCompensation}`);
     
-    // Find the saga for this payment
-    const saga = await this.sagaRepository.findOne({ where: { paymentId: paymentId } });
-    if (saga) {
-      saga.status = 'failed';
-      saga.errorMessage = reason || 'Payment cancelled';
-      await this.sagaRepository.save(saga);
+    // Find the payment first
+    const payment = await this.paymentRepository.findOne({ where: { id: paymentId } });
+    if (!payment) {
+      throw new NotFoundException(`Payment ${paymentId} not found`);
     }
 
-    // Update payment status
-    const payment = await this.paymentRepository.findOne({ where: { id: paymentId } });
-    if (payment) {
-      payment.status = 'cancelled';
-      await this.paymentRepository.save(payment);
+    // If payment is already cancelled and we're skipping saga compensation (called from compensation), just return
+    if (skipSagaCompensation && payment.status === 'cancelled') {
+      this.logger.log(`✅ [CANCEL_PAYMENT] Payment ${paymentId} is already cancelled, skipping...`);
+      return;
+    }
+
+    // Validate payment status - only pending payments can be cancelled
+    if (payment.status !== 'pending') {
+      throw new BadRequestException(`Cannot cancel payment with status: ${payment.status}. Only pending payments can be cancelled.`);
+    }
+
+    // Validate user has permission to cancel (only owner can cancel)
+    if (payerId && payment.payerId !== payerId) {
+      throw new BadRequestException('You do not have permission to cancel this payment');
+    }
+
+    // Update payment status FIRST to prevent infinite loop
+    payment.status = 'cancelled';
+    await this.paymentRepository.save(payment);
+    this.logger.log(`✅ [CANCEL_PAYMENT] Payment ${paymentId} status updated to cancelled`);
+
+    // Find the saga for this payment
+    const saga = await this.sagaRepository.findOne({ where: { paymentId: paymentId } });
+    
+    if (saga && !skipSagaCompensation) {
+      this.logger.log(`🔄 [CANCEL_PAYMENT] Found saga ${saga.id}, compensating completed steps...`);
+      
+      // Compensate completed steps in reverse order (but skip cancelPayment compensation to avoid loop)
+      if (saga.completedSteps && saga.completedSteps.length > 0) {
+        // Filter out createPayment step to avoid infinite loop
+        const stepsToCompensate = saga.completedSteps.filter(step => step.compensation !== 'cancelPayment');
+        if (stepsToCompensate.length > 0) {
+          await this.compensateSaga(stepsToCompensate, {
+            paymentId: paymentId,
+            payerId: payment.payerId,
+            studentId: payment.studentId,
+            amount: payment.tuitionAmount,
+            userEmail: saga.userEmail
+          });
+        }
+      }
+      
+      // Update saga status
+      saga.status = 'failed';
+      saga.errorMessage = reason || 'Payment cancelled by user';
+      await this.sagaRepository.save(saga);
+      this.logger.log(`✅ [CANCEL_PAYMENT] Saga ${saga.id} marked as failed`);
+    }
+
+    // Clear OTP if exists
+    try {
+      await this.microservicesClient.clearOtp(paymentId);
+      this.logger.log(`✅ [CANCEL_PAYMENT] OTP cleared for payment ${paymentId}`);
+    } catch (error) {
+      this.logger.warn(`⚠️ [CANCEL_PAYMENT] Failed to clear OTP: ${error.message}`);
+      // Don't throw, OTP will expire anyway
+    }
+
+    // Release lock
+    try {
+      await this.releaseLock(payment.studentId);
+      this.logger.log(`✅ [CANCEL_PAYMENT] Lock released for student ${payment.studentId}`);
+    } catch (error) {
+      this.logger.warn(`⚠️ [CANCEL_PAYMENT] Failed to release lock: ${error.message}`);
+    }
+
+    // Publish cancellation event
+    try {
+      await this.publishPaymentCancelledEvent(payment, reason || 'Payment cancelled by user');
+      this.logger.log(`✅ [CANCEL_PAYMENT] Cancellation event published`);
+    } catch (error) {
+      this.logger.warn(`⚠️ [CANCEL_PAYMENT] Failed to publish event: ${error.message}`);
+      // Don't throw, event publishing failure shouldn't block cancellation
     }
     
-    this.logger.log(`Payment ${paymentId} and saga cancelled: ${reason}`);
+    this.logger.log(`🎉 [CANCEL_PAYMENT] Payment ${paymentId} cancelled successfully`);
   }
 }
 
